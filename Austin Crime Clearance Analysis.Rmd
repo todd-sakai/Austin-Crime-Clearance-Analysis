@@ -1,0 +1,513 @@
+---
+title: "Austin Crime Clearance Analysis"
+subtitle: "Exploratory data analysis project, SDS 322E Elements of Data Science, UT Austin"
+author: "Todd Sakai and Krish Bangur"
+date: "November 2, 2026"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document: default
+geometry: margin=1in
+fontsize: 11pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, eval = TRUE,
+                      warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 6, fig.height = 2,
+                      R.options = list(max.print=100, width=100))
+
+# Code is hidden in the PDF; read it here in the .Rmd
+```
+
+------------------------------------------------------------------------
+
+### Key Results
+
+- **Few crimes are solved.** Austin police cleared only 13.3% of the 2025 Part I incidents with a known status (4,336 of 32,718). A Part I incident is one of the seven serious crime categories that the FBI tracks.
+- **The type of crime matters most.** The clearance rate runs from 94.7% for murder and 62.7% for robbery down to 7.3% for theft, and theft is 65% of all incidents.
+- **Districts differ, partly because of their crime mix.** District 4 cleared 17.2% and District 10 cleared 6.7%. The districts with low rates also have the most thefts.
+- **Fast reports go with more clearances.** Incidents reported within 1 hour were cleared 33.3% of the time, against 3.2% for reports made 1 to 7 days later. This is a pattern, not proof of cause.
+- **Methods:** data wrangling and exploratory analysis in R with the tidyverse (dplyr, ggplot2, lubridate) on 34,272 incidents.
+
+------------------------------------------------------------------------
+
+### Introduction
+
+We are exploring the [APD Crime Reports](https://data.austintexas.gov/Public-Safety/Crime-Reports/fdj4-gpfu/data_preview) dataset from the City of Austin Open Data Portal. Each row is an incident that an Austin Police Department (APD) officer filed a report for, listed under its most serious offense. We use only this dataset, so there is nothing to join. We study whether crimes get solved, because APD does not publish regular reports on its clearance rates ([KUT, 2024](https://www.kut.org/crime-justice/2024-09-10/austin-tx-police-department-clearance-rates-crime-rate)).
+
+An incident counts as *cleared* when APD arrests someone for it, or when APD knows who did it but cannot make the arrest (cleared by exception).
+
+Our earlier reports had one team question, and each of us now takes one part of it:
+
+- **Research question 1 (Todd):** For incidents that occurred in Austin in 2025, how do the likelihood of a crime being cleared and the number of days it takes to clear it differ across crime categories and council districts?
+
+- **Research question 2 (Krish):** For incidents that occurred in Austin in 2025, are incidents with a longer reporting delay less likely to be cleared, and does this pattern hold within each crime category?
+
+------------------------------------------------------------------------
+
+### Wrangling
+
+```{r}
+# Load the tidyverse (dplyr, ggplot2, stringr, forcats and lubridate)
+library(tidyverse)
+```
+
+The portal export held all 2,681,703 incidents since 2003 (19 columns). We downloaded a newer export for this report, so the counts differ a little from our Wrangling Report. We ran a one-time filter (kept in the .Rmd source, but not run at each knit) to keep the incidents that occurred in 2025.
+
+```{r, eval=FALSE}
+# Run once (not every knit) to keep only the incidents that occurred in 2025
+full <- read_csv("Crime_Reports_20261009.csv")
+full |>
+  filter(year(mdy(`Occurred Date`)) == 2025) |>
+  write_csv("Crime_Reports_2025.csv")
+```
+
+```{r}
+# Import the 2025 incidents, then show the number of rows and columns
+crime <- read_csv("Crime_Reports_2025.csv")
+dim(crime)
+```
+
+We made these decisions in the Project Wrangling Report and use them again here:
+
+1.  We kept only the seven serious "Part I" crime categories the FBI tracks, because clearance has a different meaning for other offenses. For example, the Wrangling Report showed that 97.4% of DWI incidents are cleared by arrest, which suggests that an arrest is usually why the report exists.
+2.  We kept 9 of the 19 columns and gave them shorter names. This time we dropped the location, family violence and hour variables, because neither research question uses them.
+3.  We converted dates and date-times from text, and we made the council district a factor.
+4.  We recoded the clearance codes into readable labels and a yes/no `cleared` variable. A missing status stays NA.
+5.  We created `delay_hours` (occurrence to report) and set the negative delays to NA, because a report cannot come before the incident.
+6.  We created `days_to_clear` only for cleared incidents. Incidents that were not cleared also have a clearance date, but that date is not a clearance.
+7.  We binned the reporting delay into four groups (`delay_group`).
+
+For this report, we also added `month`, so that we can test whether recent incidents had too little time to be cleared.
+
+```{r}
+crime_clean <- crime |>
+  # Keep the seven Part I categories only
+  filter(!is.na(`Category Description`)) |>
+  # Keep the variables that we need, with short names
+  select(incident = `Incident Number`,
+         offense = `Highest Offense Description`,
+         category = `Category Description`,
+         occurred = `Occurred Date Time`,
+         reported = `Report Date Time`,
+         occurred_date = `Occurred Date`,
+         district = `Council District`,
+         clearance_status = `Clearance Status`,
+         clearance_date = `Clearance Date`) |>
+  # Convert types: text to dates and date-times, district number to a category
+  mutate(occurred = mdy_hm(occurred),
+         reported = mdy_hm(reported),
+         occurred_date = mdy(occurred_date),
+         clearance_date = mdy(clearance_date),
+         district = factor(district, levels = 1:10)) |>
+  # Recode the codes into readable categories (no status stays NA)
+  mutate(clearance = case_when(clearance_status == "C" ~ "Cleared by arrest",
+                               clearance_status == "O" ~ "Cleared by exception",
+                               clearance_status == "N" ~ "Not cleared"),
+         cleared = case_when(clearance_status %in% c("C", "O") ~ "Yes",
+                             clearance_status == "N" ~ "No")) |>
+  # Create the numeric variables, and set impossible values to NA
+  mutate(month = month(occurred_date),
+         delay_hours = as.numeric(difftime(reported, occurred, units = "hours")),
+         delay_hours = ifelse(delay_hours < 0, NA, delay_hours),
+         days_to_clear = ifelse(cleared == "Yes",
+                                as.numeric(clearance_date - occurred_date), NA)) |>
+  # Group the reporting delay
+  mutate(delay_group = case_when(delay_hours <= 1 ~ "Within 1 hour",
+                                 delay_hours <= 24 ~ "1 to 24 hours",
+                                 delay_hours <= 24 * 7 ~ "1 to 7 days",
+                                 delay_hours > 24 * 7 ~ "More than 7 days"),
+         delay_group = factor(delay_group,
+                              levels = c("Within 1 hour", "1 to 24 hours",
+                                         "1 to 7 days", "More than 7 days"))) |>
+  # Drop the raw column that the new variables replace
+  select(-clearance_status)
+
+# Size and variable names of the final dataset
+dim(crime_clean)
+names(crime_clean)
+
+# Number of missing values in the variables of our research questions
+crime_clean |>
+  summarize(across(c(category, cleared, district, delay_hours, days_to_clear),
+                   ~ sum(is.na(.x)))) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "missing")
+```
+
+Our final dataset has 34,272 incidents and 14 variables, and one row is one Part I incident. It has these limitations:
+
+- **Missing values:** 1,554 incidents have no clearance status, 168 have no council district and 31 have no valid reporting delay. We leave each of them out of the comparisons that need that variable. `days_to_clear` is missing for 29,936 incidents, but only because those incidents were not cleared or have no status.
+- **Extreme values:** Reporting delay and days to clearance are both very right-skewed, so we use a log-type axis for them below.
+- **Approximate times:** Many incidents have a delay of exactly 0, which can mean that nobody knew the real occurrence time.
+- **Small groups:** There are only 43 murders, so the rate for that category is noisy.
+
+We also tested two concerns from the Wrangling Report. The first concern was that incidents without a status could change the results, so the table below compares the clearance rate with and without those incidents. The second concern was that late-2025 incidents had less time to be cleared, so the table after it shows the clearance rate by month.
+
+```{r}
+# Percent cleared by category: excluding missing statuses, then counting them as not cleared
+crime_clean |>
+  group_by(category) |>
+  summarize(n = n(),
+            no_status = sum(is.na(cleared)),
+            pct_excluding = round(100 * mean(cleared == "Yes", na.rm = TRUE), 1),
+            pct_as_not_cleared = round(100 * mean(cleared %in% "Yes"), 1)) |>
+  arrange(desc(pct_excluding))
+
+# Percent cleared by month of occurrence, shown in one row
+crime_clean |>
+  group_by(month) |>
+  summarize(pct_cleared = round(100 * mean(cleared == "Yes", na.rm = TRUE), 1)) |>
+  pivot_wider(names_from = month, values_from = pct_cleared)
+```
+
+The order of the categories stays the same in both columns, so we exclude the missing statuses. The monthly rate stays between 11.2% and 14.4% and does not fall at the end of the year, so we compare all months together.
+
+------------------------------------------------------------------------
+
+### Exploratory Data Analysis
+
+#### Distribution of each variable
+
+We look at each variable in our research questions on its own first.
+
+**Crime category (categorical).**
+
+```{r}
+# Number and percent of incidents in each category
+crime_clean |>
+  count(category, sort = TRUE) |>
+  mutate(percent = round(100 * n / sum(n), 1))
+
+# Bar plot of the categories, sorted by count
+crime_clean |>
+  count(category) |>
+  ggplot(aes(y = fct_reorder(category, n), x = n)) +
+  geom_col(fill = "#2b6cb0") +
+  labs(title = "Part I incidents by crime category, Austin, 2025",
+       x = "Number of incidents", y = "Crime category")
+```
+
+Theft is 64.7% of the incidents, and murder is the smallest category.
+
+**Clearance status (categorical).**
+
+```{r, fig.height=1.6}
+# Number and percent of incidents with each clearance status
+crime_clean |>
+  count(clearance, cleared) |>
+  mutate(percent = round(100 * n / sum(n), 1))
+
+# Bar plot of the clearance status, with the missing statuses labeled
+crime_clean |>
+  mutate(clearance = replace_na(clearance, "No status")) |>
+  ggplot() +
+  geom_bar(aes(y = fct_rev(fct_infreq(clearance))), fill = "#2b6cb0") +
+  labs(title = "Part I incidents by clearance status, Austin, 2025",
+       x = "Number of incidents", y = "Clearance status")
+```
+
+Most incidents (82.8%) are not cleared, and almost every cleared incident is cleared by arrest.
+
+**Council district (categorical).**
+
+```{r, fig.height=1.8}
+# Number of incidents in each district, shown in one row
+crime_clean |>
+  count(district) |>
+  pivot_wider(names_from = district, values_from = n)
+
+# Bar plot of the districts
+crime_clean |>
+  filter(!is.na(district)) |>
+  ggplot() +
+  geom_bar(aes(x = district), fill = "#2b6cb0") +
+  labs(title = "Part I incidents by council district, Austin, 2025",
+       x = "Council district", y = "Number of incidents")
+```
+
+District 9 has the most incidents (5,880) and District 8 has the fewest (1,726).
+
+**Days to clearance (numeric, cleared incidents only).**
+
+```{r}
+# Summary statistics of the days to clearance
+crime_clean |>
+  summarize(n = sum(!is.na(days_to_clear)),
+            mean = round(mean(days_to_clear, na.rm = TRUE), 1),
+            sd = round(sd(days_to_clear, na.rm = TRUE), 1),
+            min = min(days_to_clear, na.rm = TRUE),
+            median = median(days_to_clear, na.rm = TRUE),
+            IQR = IQR(days_to_clear, na.rm = TRUE),
+            max = max(days_to_clear, na.rm = TRUE),
+            pct_same_day = round(100 * mean(days_to_clear == 0, na.rm = TRUE), 1))
+
+# Histogram of the days to clearance, on an axis that keeps the zeros
+crime_clean |>
+  filter(!is.na(days_to_clear)) |>
+  ggplot() +
+  geom_histogram(aes(x = days_to_clear), bins = 25, color = "white", fill = "#2b6cb0") +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 1, 7, 30, 90, 365)) +
+  labs(title = "Days to clearance for cleared incidents, Austin, 2025",
+       x = "Days from occurrence to clearance (log + 1 scale)", y = "Number of incidents")
+```
+
+The median is 1 day, but the mean is 24.8 days because some incidents took more than a year. The longest took 615 days.
+
+**Reporting delay (numeric).**
+
+```{r}
+# Summary statistics of the reporting delay in hours
+crime_clean |>
+  summarize(n = sum(!is.na(delay_hours)),
+            mean = round(mean(delay_hours, na.rm = TRUE), 1),
+            sd = round(sd(delay_hours, na.rm = TRUE), 1),
+            min = min(delay_hours, na.rm = TRUE),
+            median = round(median(delay_hours, na.rm = TRUE), 1),
+            IQR = round(IQR(delay_hours, na.rm = TRUE), 1),
+            max = max(delay_hours, na.rm = TRUE),
+            pct_zero = round(100 * mean(delay_hours == 0, na.rm = TRUE), 1))
+
+# Histogram of the reporting delay, on an axis that keeps the zeros
+crime_clean |>
+  filter(!is.na(delay_hours)) |>
+  ggplot() +
+  geom_histogram(aes(x = delay_hours), bins = 30, color = "white", fill = "#2b6cb0") +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 1, 24, 24 * 7, 24 * 30, 24 * 365),
+                     labels = c("0", "1 hour", "1 day", "1 week", "1 month", "1 year")) +
+  labs(title = "Reporting delay, Austin, 2025",
+       x = "Time from occurrence to report (log + 1 scale)", y = "Number of incidents")
+```
+
+The median delay is 15 hours and the mean is about 222 hours, because the longest delay is about 1.8 years. The spike at 0 holds the 20.5% of incidents with a delay of exactly 0.
+
+**Reporting delay group (categorical).**
+
+```{r, fig.height=1.5}
+# Number and percent of incidents in each delay group
+crime_clean |>
+  filter(!is.na(delay_group)) |>
+  count(delay_group) |>
+  mutate(percent = round(100 * n / sum(n), 1))
+
+# Bar plot of the delay groups
+crime_clean |>
+  filter(!is.na(delay_group)) |>
+  ggplot() +
+  geom_bar(aes(y = fct_rev(delay_group)), fill = "#2b6cb0") +
+  labs(title = "Part I incidents by reporting delay, Austin, 2025",
+       x = "Number of incidents", y = "Reporting delay")
+```
+
+The groups all hold a large number of incidents, from 6,354 to 10,785, so each group gives a stable rate.
+
+#### Research question 1 (Todd): clearance across categories and districts
+
+We compare the clearance rate and the days to clearance across categories and districts.
+
+**Clearance rate by crime category.**
+
+```{r}
+# Percent cleared in each category, leaving out incidents with no status
+by_category <- crime_clean |>
+  filter(!is.na(cleared)) |>
+  group_by(category) |>
+  summarize(n = n(), pct_cleared = round(100 * mean(cleared == "Yes"), 1)) |>
+  arrange(desc(pct_cleared))
+by_category
+
+# Bar plot of the percent cleared, sorted, with the value on each bar
+ggplot(by_category, aes(y = fct_reorder(category, pct_cleared), x = pct_cleared)) +
+  geom_col(fill = "#2b6cb0") +
+  geom_text(aes(label = pct_cleared), hjust = -0.2, size = 2.8) +
+  scale_x_continuous(limits = c(0, 105)) +
+  labs(title = "Percent of incidents cleared by category, Austin, 2025",
+       x = "Incidents cleared (%)", y = "Crime category")
+```
+
+The rate runs from 94.7% for murder (only 38 incidents) to 7.3% for theft. Theft mixes very different offenses, so we split the largest ones:
+
+```{r}
+# Percent cleared for the six most common theft offenses
+crime_clean |>
+  filter(category == "Theft", !is.na(cleared)) |>
+  group_by(offense) |>
+  summarize(n = n(), pct_cleared = round(100 * mean(cleared == "Yes"), 1)) |>
+  slice_max(order_by = n, n = 6)
+```
+
+**Clearance rate by council district, with theft shown separately.**
+
+```{r, fig.height=2.4}
+# Percent cleared in each district, and the percent of incidents that are thefts
+crime_clean |>
+  filter(!is.na(cleared), !is.na(district)) |>
+  group_by(district) |>
+  summarize(n = n(),
+            pct_cleared = round(100 * mean(cleared == "Yes"), 1),
+            pct_theft = round(100 * mean(category == "Theft"), 1)) |>
+  arrange(desc(pct_cleared))
+
+# Side-by-side bars: percent cleared in each district, for theft and for the other categories
+crime_clean |>
+  filter(!is.na(cleared), !is.na(district)) |>
+  mutate(crime_type = ifelse(category == "Theft", "Theft", "All other categories")) |>
+  group_by(district, crime_type) |>
+  summarize(pct_cleared = 100 * mean(cleared == "Yes"), .groups = "drop") |>
+  ggplot(aes(x = district, y = pct_cleared, fill = crime_type)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("Theft" = "#2b6cb0", "All other categories" = "#e07b39")) +
+  labs(title = "Percent of incidents cleared by council district, Austin, 2025",
+       x = "Council district", y = "Incidents cleared (%)", fill = "Crime type")
+```
+
+Districts 4 and 3 clear the most (17.2% and 16.4%) and District 10 clears the least (6.7%). The districts with the lowest rates also tend to have the largest share of thefts, so we show theft separately.
+
+**Days to clearance by crime category and by council district.**
+
+```{r, fig.height=2.2}
+# Summary statistics of the days to clearance by category
+crime_clean |>
+  filter(!is.na(days_to_clear)) |>
+  group_by(category) |>
+  summarize(n = n(), mean = round(mean(days_to_clear), 1),
+            median = median(days_to_clear), IQR = IQR(days_to_clear)) |>
+  arrange(desc(median))
+
+# Boxplots of the days to clearance by category
+crime_clean |>
+  filter(!is.na(days_to_clear)) |>
+  ggplot() +
+  geom_boxplot(aes(x = days_to_clear,
+                   y = fct_reorder(category, days_to_clear, .fun = median)),
+               fill = "#2b6cb0", alpha = 0.4, outlier.size = 0.5) +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 1, 7, 30, 90, 365)) +
+  labs(title = "Days to clearance by crime category, Austin, 2025",
+       x = "Days from occurrence to clearance (log + 1 scale)", y = "Crime category")
+```
+
+```{r, fig.height=2.2}
+# Summary statistics of the days to clearance by district
+crime_clean |>
+  filter(!is.na(days_to_clear), !is.na(district)) |>
+  group_by(district) |>
+  summarize(n = n(), mean = round(mean(days_to_clear), 1),
+            median = median(days_to_clear), IQR = IQR(days_to_clear))
+
+# Boxplots of the days to clearance by district
+crime_clean |>
+  filter(!is.na(days_to_clear), !is.na(district)) |>
+  ggplot() +
+  geom_boxplot(aes(x = district, y = days_to_clear),
+               fill = "#2b6cb0", alpha = 0.4, outlier.size = 0.5) +
+  scale_y_continuous(trans = "log1p", breaks = c(0, 1, 7, 30, 90, 365)) +
+  labs(title = "Days to clearance by council district, Austin, 2025",
+       x = "Council district", y = "Days to clearance\n(log + 1 scale)")
+```
+
+The median for rape (81.5 days) is far above every other category. Most districts have a median of 1 or 2 days, but District 8 (13 days) and District 10 (6 days) take longer.
+
+#### Research question 2 (Krish): reporting delay and clearance
+
+We compare the clearance rate across delay groups, first overall and then within each category.
+
+**Clearance rate by reporting delay group.**
+
+```{r, fig.height=1.7}
+# Percent cleared in each delay group, leaving out missing values
+by_delay <- crime_clean |>
+  filter(!is.na(cleared), !is.na(delay_group)) |>
+  group_by(delay_group) |>
+  summarize(n = n(), pct_cleared = round(100 * mean(cleared == "Yes"), 1))
+by_delay
+
+# Bar plot of the percent cleared by delay group
+ggplot(by_delay, aes(x = delay_group, y = pct_cleared)) +
+  geom_col(fill = "#2b6cb0") +
+  geom_text(aes(label = pct_cleared), vjust = -0.3, size = 2.8) +
+  scale_y_continuous(limits = c(0, 38)) +
+  labs(title = "Percent of incidents cleared by reporting delay, Austin, 2025",
+       x = "Reporting delay", y = "Incidents cleared (%)")
+```
+
+The rate falls from 33.3% within 1 hour to 3.2% at 1 to 7 days, then it is a little higher at 5.2% for more than 7 days. To see what is behind the top group, we compare delays of exactly 0 with the other delays:
+
+```{r}
+# Percent cleared for a delay of exactly 0, for other delays within 1 hour, and for longer delays
+crime_clean |>
+  filter(!is.na(cleared), !is.na(delay_hours)) |>
+  mutate(delay_type = case_when(delay_hours == 0 ~ "Exactly 0",
+                                delay_hours <= 1 ~ "Over 0, up to 1 hour",
+                                TRUE ~ "Over 1 hour")) |>
+  group_by(delay_type) |>
+  summarize(n = n(), pct_cleared = round(100 * mean(cleared == "Yes"), 1))
+```
+
+Our guess is that some incidents with a delay of exactly 0 are crimes where an officer was present and made an arrest. If so, the arrest causes the short delay, and the short delay does not cause the arrest.
+
+**Clearance rate by reporting delay within each crime category.**
+
+```{r, fig.width=7, fig.height=2.6}
+# Percent cleared for each category and delay group, with the size of each group
+by_category_delay <- crime_clean |>
+  filter(!is.na(cleared), !is.na(delay_group)) |>
+  group_by(category, delay_group) |>
+  summarize(n = n(), pct_cleared = round(100 * mean(cleared == "Yes"), 1), .groups = "drop")
+
+# Percent cleared in one row per category (blank = no incidents)
+by_category_delay |>
+  select(-n) |>
+  pivot_wider(names_from = delay_group, values_from = pct_cleared)
+
+# Number of incidents behind each percent
+by_category_delay |>
+  select(-pct_cleared) |>
+  pivot_wider(names_from = delay_group, values_from = n)
+
+# Small multiples: one panel per category, leaving out groups with fewer than 10 incidents
+by_category_delay |>
+  filter(n >= 10) |>
+  ggplot(aes(y = fct_rev(delay_group), x = pct_cleared)) +
+  geom_col(fill = "#2b6cb0") +
+  facet_wrap(~ category, ncol = 4) +
+  labs(title = "Percent of incidents cleared by delay and category, Austin, 2025",
+       x = "Incidents cleared (%)", y = "Reporting delay")
+```
+
+The rate falls with delay in most categories, for example burglary (36.2% to 2.5%) and robbery (65.7% to 33.3%). Rape is the exception, because its highest rate (24.1%) is in the 1 to 24 hours group. Robbery has only 18 and 12 incidents in its two longest-delay groups, and murder has no incidents in them.
+
+**Reporting delay by whether the incident was cleared.**
+
+```{r, fig.height=1.6}
+# Summary statistics of the reporting delay for cleared and uncleared incidents
+crime_clean |>
+  filter(!is.na(cleared), !is.na(delay_hours)) |>
+  group_by(cleared) |>
+  summarize(n = n(), mean = round(mean(delay_hours), 1),
+            median = round(median(delay_hours), 1), IQR = round(IQR(delay_hours), 1))
+
+# Boxplots of the reporting delay for cleared and uncleared incidents
+crime_clean |>
+  filter(!is.na(cleared), !is.na(delay_hours)) |>
+  ggplot() +
+  geom_boxplot(aes(x = delay_hours, y = cleared),
+               fill = "#2b6cb0", alpha = 0.4, outlier.size = 0.5) +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 1, 24, 24 * 7, 24 * 30, 24 * 365),
+                     labels = c("0", "1 hour", "1 day", "1 week", "1 month", "1 year")) +
+  labs(title = "Reporting delay by clearance, Austin, 2025",
+       x = "Time from occurrence to report (log + 1 scale)", y = "Cleared?")
+```
+
+The median delay is 0 hours for cleared incidents and 20 hours for uncleared incidents.
+
+------------------------------------------------------------------------
+
+### Conclusion
+
+**Research question 1 (Todd).** The clearance rate depends mostly on the type of crime. Violent crimes with a known victim, such as murder, robbery and aggravated assault, are cleared most often. Property crimes are cleared least, and the lowest rates are for vehicle burglary (2.0%) and bicycle theft (1.1%). The rates of the council districts range from 6.7% to 17.2%, but the districts with low rates have more thefts, so the crime mix explains part of the gap. Most cleared incidents are cleared within 1 or 2 days, but rape cases take a median of 81.5 days, and Districts 8 and 10 take longer than the other districts.
+
+**Research question 2 (Krish).** Incidents reported quickly are cleared much more often, and this pattern holds in most crime categories. Rape is the exception. Part of the pattern probably comes from the arrest itself: when an officer is present and makes an arrest, the reporting delay is 0.
+
+**Limitations.** This analysis describes one year of data and does not test for statistical significance. A reporting delay of exactly 0 can mean that the real occurrence time is unknown. The murder rate rests on only 38 incidents with a known status.
+
+**Next steps.** A logistic regression of `cleared` on crime category, council district and reporting delay together would show whether the district differences remain after we control for the crime mix.

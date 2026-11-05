@@ -1,0 +1,15 @@
+# R
+.Rhistory
+.RData
+.Rproj.user/
+*_cache/
+*_files/
+*.knit.md
+*.utf8.md
+
+# Full 2003-2026 export (532 MB); the 2025 subset is committed instead
+Crime_Reports_2*.csv
+!Crime_Reports_2025.csv
+
+# macOS
+.DS_Store
