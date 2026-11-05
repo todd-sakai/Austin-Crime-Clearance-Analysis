@@ -13,6 +13,26 @@ This project answers two questions about crimes the Austin Police Department (AP
 | Time to clearance | Median 1 day overall, but 81.5 days for rape |
 | By reporting delay | 33.3% when reported within 1 hour, 3.2% when reported 1 to 7 days later |
 
+## Topics Covered
+
+- Filtering a 2.7-million-row public dataset down to one year
+- Data wrangling: selecting, renaming, recoding and creating variables
+- Parsing dates and date-times, and computing time differences
+- Handling missing and impossible values
+- Grouped summaries and reshaping tables
+- Exploratory data analysis: bar plots, histograms, boxplots and small multiples on log scales
+
+## R Packages Used
+
+- `tidyverse`, mainly:
+  - `readr`: loading the CSV
+  - `dplyr`: filtering, grouping and summarizing
+  - `tidyr`: reshaping tables
+  - `lubridate`: dates and times
+  - `forcats`: ordering categories in charts
+  - `ggplot2`: charts
+- `rmarkdown` and `knitr`: building the PDF report
+
 Files:
 - `Austin Crime Clearance Analysis.Rmd`: Code and text
 - `Crime_Reports_2025.csv`: The 2025 incidents, exported from the portal on October 9, 2026
